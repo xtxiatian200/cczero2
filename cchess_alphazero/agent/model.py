@@ -46,7 +46,7 @@ class CChessModel:
         res_out = x
 
         # for policy output
-        x = Conv2D(filters=2, kernel_size=1, data_format="channels_first", use_bias=False, 
+        x = Conv2D(filters=4, kernel_size=1, data_format="channels_first", use_bias=False, 
                     kernel_regularizer=l2(mc.l2_reg), name="policy_conv-1-2")(res_out)
         x = BatchNormalization(axis=1, name="policy_batchnorm")(x)
         x = Activation("relu", name="policy_relu")(x)
@@ -54,7 +54,7 @@ class CChessModel:
         policy_out = Dense(self.n_labels, kernel_regularizer=l2(mc.l2_reg), activation="softmax", name="policy_out")(x)
 
         # for value output
-        x = Conv2D(filters=4, kernel_size=1, data_format="channels_first", use_bias=False, 
+        x = Conv2D(filters=2, kernel_size=1, data_format="channels_first", use_bias=False, 
                     kernel_regularizer=l2(mc.l2_reg), name="value_conv-1-4")(res_out)
         x = BatchNormalization(axis=1, name="value_batchnorm")(x)
         x = Activation("relu",name="value_relu")(x)
@@ -89,6 +89,7 @@ class CChessModel:
             with open(weight_path, "rb") as f:
                 m.update(f.read())
             return m.hexdigest()
+        return None
 
 
     def load(self, config_path, weight_path):
@@ -116,10 +117,11 @@ class CChessModel:
     def get_pipes(self, num=1, api=None, need_reload=True):
         if self.api is None:
             self.api = CChessModelAPI(self.config, self)
-            self.api.start()
+            self.api.start(need_reload)
         return self.api.get_pipe(need_reload)
 
     def close_pipes(self):
         if self.api is not None:
             self.api.close()
+            self.api = None
 

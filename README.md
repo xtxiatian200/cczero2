@@ -1,4 +1,4 @@
-# ChineseChess-AlphaZero
+# 中国象棋Zero（CCZero）
 
 ## About
 
@@ -11,16 +11,16 @@ This project is based on these main resources:
 
 **Note**: The distributed version is in [distributed](https://github.com/NeymarL/ChineseChess-AlphaZero/tree/distributed) branch.
 
-**Note**: This repo is still under contruction. There is also a slower implementation of MCTS player (previous version), see branch [old](https://github.com/NeymarL/ChineseChess-AlphaZero/tree/old).
-
-## Contributing
+## Help to train
 
 In order to build a strong chinese chess AI following the same type of techniques as AlphaZero, we need to do this with a distributed project, as it requires a huge amount of computations.
 
 If you want to join us to build the best chinese chess AI in the world:
 
 * For instructions, see [wiki](https://github.com/NeymarL/ChineseChess-AlphaZero/wiki)
-* For live status, see http://alphazero.52coding.com.cn/
+* For live status, see https://cczero.org
+
+![elo](elo.png)
 
 
 ## Environment
@@ -39,7 +39,7 @@ This AlphaZero implementation consists of two workers: `self` and  `opt`.
 * `self` is Self-Play to generate training data by self-play using BestModel.
 * `opt` is Trainer to train model, and generate new models.
 
-For the sake of faster training (since I don't have 5000 TPUs), another two workers are involved:
+For the sake of faster training, another two workers are involved:
 
 * `sl` is Supervised learning to train data crawled from the Internet.
 * `eval` is Evaluator to evaluate the NextGenerationModel with the current BestModel.
@@ -76,7 +76,7 @@ Make sure Keras is using Tensorflow and you have Python 3.6.3+.
 
 **PlayDataConfig**
 
-* `nb_game_in_file,max_file_num`: The max game number of training data is `nb_game_in_file * max_file_num`.
+* `nb_game_in_file, max_file_num`: The max game number of training data is `nb_game_in_file * max_file_num`.
 
 **PlayConfig, PlayWithHumanConfig**
 

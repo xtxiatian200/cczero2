@@ -54,6 +54,7 @@ class PlayWithHuman:
         self.rec_labels = [None] * self.disp_record_num
         self.nn_value = 0
         self.mcts_moves = {}
+        self.history = []
         if self.config.opts.bg_style == 'WOOD':
             self.chessman_w += 1
             self.chessman_h += 1
@@ -66,7 +67,7 @@ class PlayWithHuman:
     def init_screen(self):
         bestdepth = pygame.display.mode_ok([self.screen_width, self.height], self.winstyle, 32)
         screen = pygame.display.set_mode([self.screen_width, self.height], self.winstyle, bestdepth)
-        pygame.display.set_caption("中国象棋-AlphaZero")
+        pygame.display.set_caption("中国象棋Zero")
         # create the background, tile the bgd image
         bgdtile = load_image(f'{self.config.opts.bg_style}.GIF')
         bgdtile = pygame.transform.scale(bgdtile, (self.width, self.height))
@@ -121,7 +122,7 @@ class PlayWithHuman:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.env.board.print_record()
-                    self.ai.close()
+                    self.ai.close(wait=False)
                     game_id = datetime.now().strftime("%Y%m%d-%H%M%S")
                     path = os.path.join(self.config.resource.play_record_dir, self.config.resource.play_record_filename_tmpl % game_id)
                     self.env.board.save_record(path)
@@ -147,17 +148,25 @@ class PlayWithHuman:
                                         current_chessman = chessman_sprite
                                         chessman_sprite.is_selected = True
                                     else:
+                                        move = str(current_chessman.chessman.col_num) + str(current_chessman.chessman.row_num) +\
+                                               str(col_num) + str(row_num)
                                         success = current_chessman.move(col_num, row_num, self.chessman_w, self.chessman_h)
+                                        self.history.append(move)
                                         if success:
                                             self.chessmans.remove(chessman_sprite)
                                             chessman_sprite.kill()
                                             current_chessman.is_selected = False
                                             current_chessman = None
+                                            self.history.append(self.env.get_state())
                                 elif current_chessman != None and chessman_sprite is None:
+                                    move = str(current_chessman.chessman.col_num) + str(current_chessman.chessman.row_num) +\
+                                           str(col_num) + str(row_num)
                                     success = current_chessman.move(col_num, row_num, self.chessman_w, self.chessman_h)
+                                    self.history.append(move)
                                     if success:
                                         current_chessman.is_selected = False
                                         current_chessman = None
+                                        self.history.append(self.env.get_state())
 
             self.draw_widget(screen, widget_background)
             framerate.tick(20)
@@ -169,7 +178,7 @@ class PlayWithHuman:
             self.chessmans.draw(screen)
             pygame.display.update()
 
-        self.ai.close()
+        self.ai.close(wait=False)
         logger.info(f"Winner is {self.env.board.winner} !!!")
         self.env.board.print_record()
         game_id = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -179,7 +188,7 @@ class PlayWithHuman:
 
     def ai_move(self):
         ai_move_first = not self.human_move_first
-        history = [self.env.get_state()]
+        self.history = [self.env.get_state()]
         no_act = None
         while not self.env.done:
             if ai_move_first == self.env.red_to_move:
@@ -187,23 +196,36 @@ class PlayWithHuman:
                 labels_n = len(ActionLabelsRed)
                 self.ai.search_results = {}
                 state = self.env.get_state()
-                if state in history[:-1]:
+                logger.info(f"state = {state}")
+                _, _, _, check = senv.done(state, need_check=True)
+                if not check and state in self.history[:-1]:
                     no_act = []
-                    for i in range(len(history) - 1):
-                        if history[i] == state:
-                            no_act.append(history[i + 1])
-                    if no_act != []:
+                    free_move = defaultdict(int)
+                    for i in range(len(self.history) - 1):
+                        if self.history[i] == state:
+                            # 如果走了下一步是将军或捉：禁止走那步
+                            if senv.will_check_or_catch(state, self.history[i+1]):
+                                no_act.append(self.history[i + 1])
+                            # 否则当作闲着处理
+                            else:
+                                free_move[state] += 1
+                                if free_move[state] >= 2:
+                                    # 作和棋处理
+                                    self.env.winner = Winner.draw
+                                    self.env.board.winner = Winner.draw
+                                    break
+                    if no_act:
                         logger.debug(f"no_act = {no_act}")
                 action, policy = self.ai.action(state, self.env.num_halfmoves, no_act)
                 if action is None:
                     logger.info("AI has resigned!")
                     return
-                history.append(action)
+                self.history.append(action)
                 if not self.env.red_to_move:
                     action = flip_move(action)
                 key = self.env.get_state()
                 p, v = self.ai.debug[key]
-                logger.info(f"NN value = {v:.3f}")
+                logger.info(f"check = {check}, NN value = {v:.3f}")
                 self.nn_value = v
                 logger.info("MCTS results:")
                 self.mcts_moves = {}
@@ -218,7 +240,7 @@ class PlayWithHuman:
                     self.chessmans.remove(sprite_dest)
                     sprite_dest.kill()
                 chessman_sprite.move(x1, y1, self.chessman_w, self.chessman_h)
-                history.append(self.env.get_state())
+                self.history.append(self.env.get_state())
 
     def draw_widget(self, screen, widget_background):
         white_rect = Rect(0, 0, self.screen_width - self.width, self.height)
@@ -247,7 +269,7 @@ class PlayWithHuman:
         screen.blit(widget_background, (self.width, 0))
 
     def draw_evaluation(self, screen, widget_background):
-        title_label = 'AlphaZero信息'
+        title_label = 'CC-Zero信息'
         self.draw_label(screen, widget_background, title_label, 300, 16, 10)
         info_label = f'MCTS搜索次数：{self.config.play.simulation_num_per_move}'
         self.draw_label(screen, widget_background, info_label, 335, 14, 10)

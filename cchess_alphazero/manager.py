@@ -21,7 +21,7 @@ def create_parser():
     parser.add_argument("--total-step", help="set TrainerConfig.start_total_steps", type=int)
     parser.add_argument("--ai-move-first", help="set human or AI move first", action="store_true")
     parser.add_argument("--cli", help="play with AI with CLI, default with GUI", action="store_true")
-    parser.add_argument("--gpu", help="device list", default="0,1")
+    parser.add_argument("--gpu", help="device list", default="0")
     parser.add_argument("--onegreen", help="train sl work with onegreen data", action="store_true")
     parser.add_argument("--skip", help="skip games", default=0, type=int)
     parser.add_argument("--ucci", help="play with ucci engine instead of self play", action="store_true")
@@ -62,6 +62,13 @@ def start():
     config.opts.bg_style = args.bg_style
     config.internet.distributed = args.distributed
 
+    # use multiple GPU
+    gpus = config.opts.device_list.split(',')
+    if len(gpus) > 1:
+        config.opts.use_multiple_gpus = True
+        config.opts.gpu_num = len(gpus)
+        logger.info(f"User GPU {config.opts.device_list}")
+
     if args.cmd == 'self':
         if args.ucci:
             import cchess_alphazero.worker.play_with_ucci_engine as self_play
@@ -88,7 +95,10 @@ def start():
         if args.elo == False:
             from cchess_alphazero.worker import evaluator
         else:
-            import cchess_alphazero.worker.compute_elo as evaluator
+            if mp.get_start_method() == 'spawn':
+                import cchess_alphazero.worker.compute_elo_windows as evaluator
+            else:
+                import cchess_alphazero.worker.compute_elo as evaluator
         config.eval.update_play_config(config.play)
         evaluator.start(config)
     elif args.cmd == 'sl':

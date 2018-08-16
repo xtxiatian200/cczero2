@@ -1,4 +1,5 @@
 import os
+import gc
 import subprocess
 import numpy as np
 from time import sleep
@@ -61,11 +62,11 @@ class SelfPlayWorker:
 
         idx = 1
         self.buffer = []
-        search_tree = defaultdict(VisitState)
 
         while True:
+            search_tree = defaultdict(VisitState)
             start_time = time()
-            value, turns, state, search_tree, store = self.start_game(idx, search_tree)
+            value, turns, state, store = self.start_game(idx, search_tree)
             end_time = time()
             if value != 1 and value != -1:
                 winner = 'Draw'
@@ -97,22 +98,22 @@ class SelfPlayWorker:
 
         state = senv.INIT_STATE
         history = [state]
-        policys = [] 
         value = 0
         turns = 0       # even == red; odd == black
         game_over = False
         is_alpha_red = True if idx % 2 == 0 else False
         final_move = None
+        check = False
 
         while not game_over:
             if (is_alpha_red and turns % 2 == 0) or (not is_alpha_red and turns % 2 == 1):
                 no_act = None
-                if state in history[:-1]:
+                if not check and state in history[:-1]:
                     no_act = []
                     for i in range(len(history) - 1):
                         if history[i] == state:
                             no_act.append(history[i + 1])
-                action, policy = self.player.action(state, turns, no_act)
+                action, _ = self.player.action(state, turns, no_act)
                 if action is None:
                     logger.debug(f"{turns % 2} (0 = red; 1 = black) has resigned!")
                     value = -1
@@ -126,37 +127,33 @@ class SelfPlayWorker:
                     break
                 if turns % 2 == 1:
                     action = flip_move(action)
-                try:
-                    policy = self.build_policy(action, False)
-                except Exception as e:
-                    logger.error(f"Build policy error {e}, action = {action}, state = {state}, fen = {fen}")
-                    value = 0
-                    break
             history.append(action)
-            policys.append(policy)
             state = senv.step(state, action)
             turns += 1
             history.append(state)
 
             if turns / 2 >= self.config.play.max_game_length:
                 game_over = True
-                value = senv.evaluate(state)
+                value = 0
             else:
-                game_over, value, final_move = senv.done(state)
+                game_over, value, final_move, check = senv.done(state, need_check=True)
 
         if final_move:
-            policy = self.build_policy(final_move, False)
             history.append(final_move)
-            policys.append(policy)
             state = senv.step(state, final_move)
             history.append(state)
+            turns += 1
+            value = -value
 
         self.player.close()
+        del search_tree
+        del self.player
+        gc.collect()
         if turns % 2 == 1:  # balck turn
             value = -value
 
         v = value
-        if v == 0 or turns <= 10:
+        if turns <= 10:
             if random() > 0.7:
                 store = True
             else:
@@ -165,16 +162,16 @@ class SelfPlayWorker:
             store = True
 
         if store:
-            data = []
+            data = [history[0]]
             for i in range(turns):
                 k = i * 2
-                data.append([history[k], policys[i], value])
+                data.append([history[k + 1], value])
                 value = -value
             self.save_play_data(idx, data)
 
         self.cur_pipes.append(pipes)
         self.remove_play_data()
-        return v, turns, state, search_tree, store
+        return v, turns, state, store
 
     def get_ucci_move(self, fen, time=3):
         p = subprocess.Popen(self.config.resource.eleeye_path,

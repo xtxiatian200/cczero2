@@ -1,7 +1,9 @@
 from multiprocessing import connection, Pipe
 from threading import Thread
 
+import os
 import numpy as np
+import shutil
 
 from cchess_alphazero.config import Config
 from cchess_alphazero.lib.model_helper import load_best_model_weight, need_to_reload_best_model_weight
@@ -20,7 +22,8 @@ class CChessModelAPI:
         self.need_reload = True
         self.done = False
 
-    def start(self):
+    def start(self, need_reload=True):
+        self.need_reload = need_reload
         prediction_worker = Thread(target=self.predict_batch_worker, name="prediction_worker")
         prediction_worker.daemon = True
         prediction_worker.start()
@@ -32,11 +35,11 @@ class CChessModelAPI:
         return you
 
     def predict_batch_worker(self):
-        if self.config.internet.distributed:
+        if self.config.internet.distributed and self.need_reload:
             self.try_reload_model_from_internet()
         last_model_check_time = time()
         while not self.done:
-            if last_model_check_time + 600 < time():
+            if last_model_check_time + 600 < time() and self.need_reload:
                 self.try_reload_model()
                 last_model_check_time = time()
             ready = connection.wait(self.pipes, timeout=0.001)
@@ -47,12 +50,15 @@ class CChessModelAPI:
                 while pipe.poll():
                     try:
                         tmp = pipe.recv()
-                        data.extend(tmp)
-                        data_len.append(len(tmp))
-                        result_pipes.append(pipe)
                     except EOFError as e:
                         logger.error(f"EOF error: {e}")
                         pipe.close()
+                    else:
+                        data.extend(tmp)
+                        data_len.append(len(tmp))
+                        result_pipes.append(pipe)
+            if not data:
+                continue
             data = np.asarray(data, dtype=np.float32)
             with self.agent_model.graph.as_default():
                 policy_ary, value_ary = self.agent_model.model.predict_on_batch(data)
@@ -67,9 +73,12 @@ class CChessModelAPI:
                     k = 0
                     i += 1
 
-    def try_reload_model(self):
+    def try_reload_model(self, config_file=None):
+        if config_file:
+            config_path = os.path.join(self.config.resource.model_dir, config_file)
+            shutil.copy(config_path, self.config.resource.model_best_config_path)
         try:
-            if self.config.internet.distributed:
+            if self.config.internet.distributed and not config_file:
                 self.try_reload_model_from_internet()
             else:
                 if self.need_reload and need_to_reload_best_model_weight(self.agent_model):
@@ -78,23 +87,31 @@ class CChessModelAPI:
         except Exception as e:
             logger.error(e)
 
-    def try_reload_model_from_internet(self):
+    def try_reload_model_from_internet(self, config_file=None):
         response = http_request(self.config.internet.get_latest_digest)
         if response is None:
-            logger.error(f"Could not fetch remote digest!")
+            logger.error(f"无法连接到远程服务器！请检查网络连接，并重新打开客户端")
             return
         digest = response['data']['digest']
 
         if digest != self.agent_model.fetch_digest(self.config.resource.model_best_weight_path):
-            logger.info("the best model is changed, start download remote model")
+            logger.info(f"正在下载最新权重，请稍后...")
             if download_file(self.config.internet.download_url, self.config.resource.model_best_weight_path):
-                logger.info(f"Download remote model finished!")
-                with self.agent_model.graph.as_default():
-                    load_best_model_weight(self.agent_model)
+                logger.info(f"权重下载完毕！开始训练...")
+                try:
+                    with self.agent_model.graph.as_default():
+                        load_best_model_weight(self.agent_model)
+                except ValueError as e:
+                    logger.error(f"权重架构不匹配，自动重新加载 {e}")
+                    self.try_reload_model(config_file='model_192x10_config.json')
+                except Exception as e:
+                    logger.error(f"加载权重发生错误：{e}，稍后重新下载")
+                    os.remove(self.config.resource.model_best_weight_path)
+                    self.try_reload_model_from_internet()
             else:
-                logger.error(f"Download remote model failed!")
+                logger.error(f"权重下载失败！请检查网络连接，并重新打开客户端")
         else:
-            logger.info(f'the best model is not changed')
+            logger.info(f"检查完毕，权重未更新")
 
     def close(self):
         self.done = True

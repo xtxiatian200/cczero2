@@ -2,12 +2,15 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from logging import getLogger
 from threading import Lock, Condition
+import concurrent.futures.thread
 
 import numpy as np
 import cchess_alphazero.environment.static_env as senv
 from cchess_alphazero.config import Config
-from cchess_alphazero.environment.lookup_tables import Winner, ActionLabelsRed
+from cchess_alphazero.environment.lookup_tables import Winner, ActionLabelsRed, flip_move
 from time import time, sleep
+import gc 
+import sys
 
 logger = getLogger(__name__)
 
@@ -28,10 +31,10 @@ class ActionState:
         self.w = 0      # W(s, a) : total action value
         self.q = 0      # Q(s, a) = N / W : action value
         self.p = 0      # P(s, a) : prior probability
-        self.next = None
 
 class CChessPlayer:
-    def __init__(self, config: Config, search_tree=None, pipes=None, play_config=None, enable_resign=False, debugging=False):
+    def __init__(self, config: Config, search_tree=None, pipes=None, play_config=None, 
+            enable_resign=False, debugging=False, uci=False, use_history=False, side=0):
         self.config = config
         self.play_config = play_config or self.config.play
         self.labels_n = len(ActionLabelsRed)
@@ -39,6 +42,8 @@ class CChessPlayer:
         self.move_lookup = {move: i for move, i in zip(self.labels, range(self.labels_n))}
         self.pipe = pipes                   # pipes that used to communicate with CChessModelAPI thread
         self.node_lock = defaultdict(Lock)  # key: state key, value: Lock of that state
+        self.use_history = use_history
+        self.increase_temp = False
 
         if search_tree is None:
             self.tree = defaultdict(VisitState)  # key: state key, value: VisitState
@@ -52,6 +57,7 @@ class CChessPlayer:
 
         self.search_results = {}        # for debug
         self.debug = {}
+        self.side = side
 
         self.s_lock = Lock()
         self.run_lock = Lock()
@@ -62,6 +68,9 @@ class CChessPlayer:
 
         self.all_done = Lock()
         self.num_task = 0
+        self.done_tasks = 0
+        self.uci = uci
+        self.no_act = None
 
         self.job_done = False
 
@@ -69,10 +78,32 @@ class CChessPlayer:
         self.executor.submit(self.receiver)
         self.executor.submit(self.sender)
 
-    def close(self):
+    def close(self, wait=True):
+        self.job_done = True
+        del self.tree
+        gc.collect()
+        if self.executor is not None:
+            self.executor.shutdown(wait=wait)
+
+    def close_and_return_action(self, state, turns, no_act=None):
         self.job_done = True
         if self.executor is not None:
-            self.executor.shutdown()
+            self.executor.shutdown(wait=False)
+            # self.executor = None
+            self.executor._threads.clear()
+            concurrent.futures.thread._threads_queues.clear()
+        policy, resign = self.calc_policy(state, turns, no_act)
+        if resign:  # resign
+            return None
+        if no_act is not None:
+            for act in no_act:
+                policy[self.move_lookup[act]] = 0
+        my_action = int(np.random.choice(range(self.labels_n), p=self.apply_temperature(policy, turns)))
+        if state in self.debug:
+            _, value = self.debug[state]
+        else:
+            value = 0
+        return self.labels[my_action], value, self.done_tasks // 100
 
     def sender(self):
         '''
@@ -111,30 +142,49 @@ class CChessPlayer:
                 self.buffer_history = self.buffer_history[k:]
             self.run_lock.release()
 
-    def action(self, state, turns, no_act=None) -> str:
+    def action(self, state, turns, no_act=None, depth=None, infinite=False, hist=None, increase_temp=False) -> str:
         self.all_done.acquire(True)
         self.root_state = state
+        self.no_act = no_act
+        self.increase_temp = increase_temp
+        if hist and len(hist) >= 5:
+            hist = hist[-5:]
         done = 0
         if state in self.tree:
             done = self.tree[state].sum_n
+        if no_act or increase_temp or done == self.play_config.simulation_num_per_move:
+            # logger.info(f"no_act = {no_act}, increase_temp = {increase_temp}")
+            done = 0
+        self.done_tasks = done
         self.num_task = self.play_config.simulation_num_per_move - done
-
+        if depth:
+            self.num_task = depth - done if depth > done else 0
+        if infinite:
+            self.num_task = 100000
+        depth = 0
+        start_time = time()
         # MCTS search
         if self.num_task > 0:
-            # logger.debug(f"all_task = {self.num_task}")
             all_tasks = self.num_task
             batch = all_tasks // self.config.play.search_threads
             if all_tasks % self.config.play.search_threads != 0:
                 batch += 1
+            # logger.debug(f"all_task = {self.num_task}, batch = {batch}")
             for iter in range(batch):
                 self.num_task = min(self.config.play.search_threads, all_tasks - self.config.play.search_threads * iter)
+                self.done_tasks += self.num_task
                 # logger.debug(f"iter = {iter}, num_task = {self.num_task}")
                 for i in range(self.num_task):
-                    self.executor.submit(self.MCTS_search, state, [state], True)
+                    self.executor.submit(self.MCTS_search, state, [state], True, hist)
                 self.all_done.acquire(True)
+                if self.uci and depth != self.done_tasks // 100:
+                    # info depth xx pv xxx
+                    depth = self.done_tasks // 100
+                    _, value = self.debug[state]
+                    self.print_depth_info(state, turns, start_time, value, no_act)
         self.all_done.release()
 
-        policy, resign = self.calc_policy(state, turns)
+        policy, resign = self.calc_policy(state, turns, no_act)
 
         if resign:  # resign
             return None, list(policy)
@@ -145,7 +195,7 @@ class CChessPlayer:
         my_action = int(np.random.choice(range(self.labels_n), p=self.apply_temperature(policy, turns)))
         return self.labels[my_action], list(policy)
 
-    def MCTS_search(self, state, history=[], is_root_node=False) -> float:
+    def MCTS_search(self, state, history=[], is_root_node=False, real_hist=None) -> float:
         """
         Monte Carlo Tree Search
         """
@@ -153,6 +203,7 @@ class CChessPlayer:
             # logger.debug(f"start MCTS, state = {state}, history = {history}")
             game_over, v, _ = senv.done(state)
             if game_over:
+                v = v * 2
                 self.executor.submit(self.update_tree, None, v, history)
                 break
 
@@ -163,12 +214,23 @@ class CChessPlayer:
                     self.tree[state].legal_moves = senv.get_legal_moves(state)
                     self.tree[state].waiting = True
                     # logger.debug(f"expand_and_evaluate {state}, sum_n = {self.tree[state].sum_n}, history = {history}")
-                    self.expand_and_evaluate(state, history)
+                    if is_root_node and real_hist:
+                        self.expand_and_evaluate(state, history, real_hist)
+                    else:
+                        self.expand_and_evaluate(state, history)
                     break
 
-                if state in history[:-1]: # loop -> loss
-                    # logger.debug(f"loop -> loss, state = {state}, history = {history[:-1]}")
-                    self.executor.submit(self.update_tree, None, 0, history)
+                if state in history[:-1]: # loop
+                    for i in range(len(history) - 1):
+                        if history[i] == state:
+                            if senv.will_check_or_catch(state, history[i+1]):
+                                self.executor.submit(self.update_tree, None, -1, history)
+                            elif senv.be_catched(state, history[i+1]):
+                                self.executor.submit(self.update_tree, None, 1, history)
+                            else:
+                                # logger.debug(f"loop -> loss, state = {state}, history = {history[:-1]}")
+                                self.executor.submit(self.update_tree, None, 0, history)
+                            break
                     break
 
                 # Select
@@ -191,13 +253,11 @@ class CChessPlayer:
 
                 # logger.debug(f"apply virtual_loss = {virtual_loss}, as.n = {action_state.n}, w = {action_state.w}, q = {action_state.q}")
                 
-                if action_state.next is None:
-                    action_state.next = senv.step(state, sel_action)
+                # if action_state.next is None:
+                history.append(sel_action)
+                state = senv.step(state, sel_action)
+                history.append(state)
                 # logger.debug(f"step action {sel_action}, next = {action_state.next}")
-
-            history.append(sel_action)
-            state = action_state.next
-            history.append(state)
 
     def select_action_q_and_u(self, state, is_root_node) -> str:
         '''
@@ -232,12 +292,16 @@ class CChessPlayer:
 
         best_score = -99999999
         best_action = None
+        move_counts = len(legal_moves)
 
         for mov in legal_moves:
+            if is_root_node and self.no_act and mov in self.no_act:
+                # logger.debug(f"mov = {mov}, no_act = {self.no_act}, continue")
+                continue
             action_state = node.a[mov]
             p_ = action_state.p
             if is_root_node:
-                p_ = (1 - e) * p_ + e * np.random.dirichlet([dir_alpha])[0]
+                p_ = (1 - e) * p_ + e * np.random.dirichlet(dir_alpha * np.ones(move_counts))[0]
             # Q + U
             score = action_state.q + c_puct * p_ * xx_ / (1 + action_state.n)
             # if score > 0.1 and is_root_node:
@@ -245,7 +309,7 @@ class CChessPlayer:
             if action_state.q > (1 - 1e-7):
                 best_action = mov
                 break
-            if score > best_score:
+            if score >= best_score:
                 best_score = score
                 best_action = mov
 
@@ -255,11 +319,19 @@ class CChessPlayer:
         #     logger.debug(f"selected action = {best_action}, with U + Q = {best_score}")
         return best_action
 
-    def expand_and_evaluate(self, state, history):
+    def expand_and_evaluate(self, state, history, real_hist=None):
         '''
         Evaluate the state, return its policy and value computed by neural network
         '''
-        state_planes = senv.state_to_planes(state)
+        if self.use_history:
+            if real_hist:
+                # logger.debug(f"real history = {real_hist}")
+                state_planes = senv.state_history_to_planes(state, real_hist)
+            else:
+                # logger.debug(f"history = {history}")
+                state_planes = senv.state_history_to_planes(state, history)
+        else:
+            state_planes = senv.state_to_planes(state)
         with self.q_lock:
             self.buffer_planes.append(state_planes)
             self.buffer_history.append(history)
@@ -280,8 +352,6 @@ class CChessPlayer:
                 for hist in node.visit:
                     self.executor.submit(self.MCTS_search, state, hist)
                 node.visit = []
-                # node.w += v
-                # z = node.w * 1.0 / node.sum_n
 
         virtual_loss = self.config.play.virtual_loss
         # logger.debug(f"backup from {state}, v = {v}, history = {history}")
@@ -291,12 +361,10 @@ class CChessPlayer:
             v = - v
             with self.node_lock[state]:
                 node = self.tree[state]
-                # node.w += v
                 action_state = node.a[action]
                 action_state.n += 1 - virtual_loss
                 action_state.w += v + virtual_loss
                 action_state.q = action_state.w * 1.0 / action_state.n
-                # z = node.w * 1.0 / node.sum_n
                 # logger.debug(f"update value: state = {state}, action = {action}, n = {action_state.n}, w = {action_state.w}, q = {action_state.q}")
 
         with self.t_lock:
@@ -305,7 +373,7 @@ class CChessPlayer:
             if self.num_task <= 0:
                 self.all_done.release()
 
-    def calc_policy(self, state, turns) -> np.ndarray:
+    def calc_policy(self, state, turns, no_act) -> np.ndarray:
         '''
         calculate π(a|s0) according to the visit count
         '''
@@ -316,6 +384,9 @@ class CChessPlayer:
 
         for mov, action_state in node.a.items():
             policy[self.move_lookup[mov]] = action_state.n
+            if no_act and mov in no_act:
+                policy[self.move_lookup[mov]] = 0
+                continue
             if self.debugging:
                 debug_result[mov] = (action_state.n, action_state.q, action_state.p)
             if action_state.q > max_q_value:
@@ -335,13 +406,60 @@ class CChessPlayer:
         policy /= np.sum(policy)
         return policy, False
 
+    def print_depth_info(self, state, turns, start_time, value, no_act):
+        '''
+        info depth xx pv xxx
+        '''
+        depth = self.done_tasks // 100
+        end_time = time()
+        pv = ""
+        i = 0
+        while i < 20:
+            node = self.tree[state]
+            bestmove = None
+            root = True
+            n = 0
+            if len(node.a) == 0:
+                break
+            for mov, action_state in node.a.items():
+                if action_state.n >= n:
+                    if root and no_act and mov in no_act:
+                        continue
+                    n = action_state.n
+                    bestmove = mov
+            if bestmove is None:
+                logger.error(f"state = {state}, turns = {turns}, no_act = {no_act}, root = {root}, len(as) = {len(node.a)}")
+                break
+            state = senv.step(state, bestmove)
+            root = False
+            if turns % 2 == 1:
+                bestmove = flip_move(bestmove)
+            bestmove = senv.to_uci_move(bestmove)
+            pv += " " + bestmove
+            i += 1
+            turns += 1
+        if state in self.debug:
+            _, value = self.debug[state]
+            if turns % 2 != self.side:
+                value = -value
+        score = int(value * 1000)
+        duration = end_time - start_time
+        nps = int(depth * 100 / duration) * 1000
+        output = f"info depth {depth} score {score} time {int(duration * 1000)} pv" + pv + f" nps {nps}"
+        print(output)
+        logger.debug(output)
+        sys.stdout.flush()
+        
+
     def apply_temperature(self, policy, turn) -> np.ndarray:
         if turn < 30 and self.play_config.tau_decay_rate != 0:
             tau = tau = np.power(self.play_config.tau_decay_rate, turn + 1)
         else:
             tau = 0
-        if tau < 0.1:
+        if tau < 0.1 or (turn >= 4 and self.config.opts.evaluate):
              tau = 0
+        if self.increase_temp and not self.config.opts.evaluate:
+            tau = 0.5
         if tau == 0:
             action = np.argmax(policy)
             ret = np.zeros(self.labels_n)

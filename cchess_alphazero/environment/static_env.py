@@ -1,7 +1,7 @@
 import numpy as np
 
 from cchess_alphazero.environment.light_env.common import *
-from cchess_alphazero.environment.lookup_tables import Winner, Fen_2_Idx
+from cchess_alphazero.environment.lookup_tables import Winner, Fen_2_Idx, flip_move
 from logging import getLogger
 
 logger = getLogger(__name__)
@@ -11,7 +11,13 @@ INIT_STATE = 'rkemsmekr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RKEMSMEKR'
 BOARD_HEIGHT = 10
 BOARD_WIDTH = 9
 
-def done(state):
+def done(state, turns=-1, need_check=False):
+    if 's' not in state:
+        return (True, 1, None)
+    if 'S' not in state:
+        return (True, -1, None)
+    # if turns > 0 and turns < 20:
+    #     return (False, 0, None)
     board = state_to_board(state)
     red_k, black_k = [0, 0], [0, 0]
     winner = None
@@ -42,6 +48,7 @@ def done(state):
             v = 1
             winner = Winner.red
     final_move = None
+    check = False
     if winner is None:
         legal_moves = get_legal_moves(state, board)
         for mov in legal_moves:
@@ -51,7 +58,23 @@ def done(state):
                 v = 1
                 final_move = mov
                 break
-    return (winner is not None, v, final_move)
+    if winner is None and need_check:
+        black_state = fliped_state(state)
+        black_moves = get_legal_moves(black_state)
+        # render(black_state)
+        red_k[0] = 9 - red_k[0]
+        red_k[1] = 8 - red_k[1]
+        for mov in black_moves:
+            dest = [int(mov[3]), int(mov[2])]
+            if dest == red_k:
+                check = True
+                # logger.debug(f"Checking move {mov}")
+                break
+        # logger.debug(f"red_k = {red_k}, black_moves = {black_moves}, check = {check}")
+    if need_check:
+        return (winner is not None, v, final_move, check)
+    else:
+        return (winner is not None, v, final_move)
 
 def step(state, action):
     board = state_to_board(state)
@@ -61,6 +84,18 @@ def step(state, action):
     board[int(action[1])][int(action[0])] = '.'
     state = board_to_state(board)
     return fliped_state(state)
+
+def new_step(state, action):
+    no_eat = True
+    board = state_to_board(state)
+    if board[int(action[1])][int(action[0])] == '.':
+        raise ValueError(f"No chessman in {action}, state = {state}")
+    if board[int(action[3])][int(action[2])] != '.':
+        no_eat = False
+    board[int(action[3])][int(action[2])] = board[int(action[1])][int(action[0])]
+    board[int(action[1])][int(action[0])] = '.'
+    state = board_to_state(board)
+    return fliped_state(state), no_eat
 
 def evaluate(state):
     piece_vals = {'R': 14, 'K': 7, 'E': 3, 'M': 2, 'S':1, 'C': 5, 'P': 1} # for RED account
@@ -120,6 +155,44 @@ def state_to_planes(state):
                 j += int(letter)
     return planes
 
+def state_history_to_planes(state, history):
+    '''
+    e.g.
+        rkemsmekr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RKEMSMEKR
+        rkemsmek1/8r/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RKEMSMEKR
+    '''
+    # logger.debug(f"state = {state}")
+    planes = np.zeros(shape=(28, 10, 9), dtype=np.float32)
+    rows = state.split('/')
+    # 0 ~ 14 for current state
+    for i in range(len(rows)):
+        row = rows[i]
+        j = 0
+        for letter in row:
+            if letter.isalpha():
+                # 0 ~ 7 : upper, 7 ~ 14: lower
+                planes[Fen_2_Idx[letter] + int(letter.islower()) * 7][i][j] = 1
+                j += 1
+            else:
+                j += int(letter)
+    # 14 ~ 28 for last state
+    # history = [...,last state, red action, black state, black action, current state]
+    if history and len(history) >= 5:
+        last_state = history[-5]
+        # logger.debug(f"last state = {last_state}")
+        rows = last_state.split('/')
+        for i in range(len(rows)):
+            row = rows[i]
+            j = 0
+            for letter in row:
+                if letter.isalpha():
+                    # 0 ~ 7 : upper, 7 ~ 14: lower
+                    planes[Fen_2_Idx[letter] + int(letter.islower()) * 7 + 14][i][j] = 1
+                    j += 1
+                else:
+                    j += int(letter)
+    return planes
+
 def board_to_state(board):
     c = 0
     fen = ''
@@ -147,6 +220,12 @@ def state_to_fen(state, turns):
         return fen
     else:
         return flip_fen(fen)
+
+def fen_to_state(fen):
+    foo = fen.split(' ')
+    position = foo[0]
+    state = "".join([replace_dict[s] if s.isalpha() else s for s in position])
+    return state
 
 def flip_fen(fen):
     foo = fen.split(' ')
@@ -281,6 +360,7 @@ def render(state):
     board = state_to_board(state)
     for i in range(9, -1, -1):
         logger.debug(board[i])
+        # print(board[i])
 
 def init(pos):
     board = [['.' for col in range(BOARD_WIDTH)] for row in range(BOARD_HEIGHT)]
@@ -301,4 +381,99 @@ def parse_ucci_move(move):
     x0, x1 = ord(move[0]) - ord('a'), ord(move[2]) - ord('a')
     move = str(x0) + move[1] + str(x1) + move[3]
     return move
-    
+
+def to_uci_move(action):
+    x0, x1 = chr(ord('a') + int(action[0])), chr(ord('a') + int(action[2]))
+    move = x0 + action[1] + x1 + action[3]
+    return move
+
+def will_check_or_catch(ori_state, action):
+    '''
+    判断走了下一步是否会造成红方将军或捉子
+    '''
+    state = step(ori_state, action)     # 判断当前state的红方是否会被将/捉
+    board = state_to_board(state)
+    # permanent check
+    red_k = [0, 0]
+    for i in range(BOARD_HEIGHT):
+        for j in range(BOARD_WIDTH):
+            if board[i][j] == 'k':
+                red_k[0] = i
+                red_k[1] = j
+    black_state = fliped_state(state)
+    black_moves = get_legal_moves(black_state)
+    # render(black_state)
+    red_k[0] = 9 - red_k[0]
+    red_k[1] = 8 - red_k[1]
+    for mov in black_moves:
+        dest = [int(mov[3]), int(mov[2])]
+        if dest == red_k:
+            check = True
+            # logger.debug(f"Checking move {mov}")
+            return True
+    # permanent catch
+    first_set = get_catch_list(ori_state)
+    second_set = get_catch_list(black_state, black_moves)
+    if second_set - first_set != set() and len(second_set) >= len(first_set):
+        # logger.debug(f"Permanent catch, first_set = {first_set}, second_set = {second_set}")
+        return True
+    else:
+        return False
+
+def get_catch_list(state, moves=None):
+    catch_list = set()
+    if not moves:
+        moves = get_legal_moves(state)
+    for mov in moves:
+        next_state, no_eat = new_step(state, mov)
+        if not no_eat:  # 有吃子
+            # 判断能不能吃回来(防御)
+            could_defend = False
+            next_moves = get_legal_moves(next_state)
+            fliped_move = flip_move(mov)
+            dest = fliped_move[2:]
+            for nmov in next_moves:
+                if nmov[2:] == dest:
+                    could_defend = True
+                    break
+            if not could_defend:
+                i = int(mov[1])
+                j = int(mov[0])
+                black_board = state_to_board(state)
+                if black_board[i][j] == 'p' and i <= 4:
+                    continue
+                m = int(mov[3])
+                n = int(mov[2])
+                if black_board[m][n] == 'P' and m > 4:
+                    continue
+                # 判断是否为兑
+                if black_board[m][n].upper() == black_board[i][j].upper():
+                    continue
+                # print(f"Catch: mov = {mov}, chessman = {black_board[i][j]}")
+                catch_list.add((black_board[i][j], i, j, black_board[m][n], m, n))
+    return catch_list
+
+def be_catched(state, mov):
+    i = int(mov[1])
+    j = int(mov[0])
+    position = [i, j]
+    board = state_to_board(state)
+    black_state = fliped_state(state)
+    black_moves = get_legal_moves(black_state)
+    position[0] = 9 - position[0]
+    position[1] = 8 - position[1]
+    for mov in black_moves:
+        dest = [int(mov[3]), int(mov[2])]
+        if dest == position:
+            return True
+    return False
+
+def has_attack_chessman(state):
+    '''
+    INIT_STATE = 'rkemsmekr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RKEMSMEKR'
+    '''
+    for chessman in state:
+        c = chessman.lower()
+        if c == 'r' or c == 'k' or c == 'p' or c == 'c':
+            return True
+    return False

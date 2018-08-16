@@ -77,10 +77,15 @@ class ResourceConfig:
 class Options:
     new = False
     light = True
-    device_list = '0,1'
+    device_list = '0'
     bg_style = 'CANVAS'
     piece_style = 'WOOD'
     random = 'none'
+    log_move = False
+    use_multiple_gpus = False
+    gpu_num = 1
+    evaluate = False
+    has_history = False
 
 class PlayWithHumanConfig:
     def __init__(self):
@@ -103,10 +108,17 @@ class InternetConfig:
     def __init__(self):
         self.distributed = False
         self.username = getpass.getuser()
-        self.base_url = 'http://alphazero.52coding.com.cn'
-        self.upload_url = f'{self.base_url}/api/upload_game_file'
-        self.download_url = f'{self.base_url}/model_best_weight.h5'
-        self.get_latest_digest = f'{self.base_url}/api/get_latest_digest'
+        self.base_url = 'https://cczero.org'
+        self.upload_url = f'{self.base_url}/api/upload_game_file/192x10'
+        self.upload_eval_url = f'{self.base_url}/api/upload_eval_game_file'
+        self.download_url = f'http://download.52coding.com.cn/192x10/model_best_weight.h5'
+        # self.download_url = 'http://alphazero-1251776088.cossh.myqcloud.com/model/128x7/model_best_weight.h5'
+        self.get_latest_digest = f'{self.base_url}/api/get_latest_digest/192x10'
         self.add_model_url = f'{self.base_url}/api/add_model'
+        self.get_evaluate_model_url = f'{self.base_url}/api/query_for_evaluate'
+        self.download_base_url = f'http://download.52coding.com.cn/'
+        # self.download_base_url = 'http://alphazero-1251776088.cossh.myqcloud.com/model/'
+        self.get_elo_url = f'{self.base_url}/api/get_elo/'
+        self.update_elo_url = f'{self.base_url}/api/add_eval_result/'
 
 

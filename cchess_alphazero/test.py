@@ -196,7 +196,7 @@ def test_ucci():
 
 def test_done():
     import cchess_alphazero.environment.static_env as senv
-    state = '1Rems1e1r/4m4/2c6/p3C1p1p/9/6P2/P3P3P/1c5C1/3p5/2EMSME1R'
+    state = '4s4/9/4e4/p8/2e2R2p/P5E2/8P/9/9/4S1E2'
     board = senv.state_to_board(state)
     for i in range(9, -1, -1):
         print(board[i])
@@ -233,6 +233,101 @@ def test_request():
     res = http_request(url, post=True, data=data)
     print(res)
 
+def fixbug():
+    from cchess_alphazero.config import Config
+    from cchess_alphazero.lib.data_helper import get_game_data_filenames, read_game_data_from_file, write_game_data_to_file
+    import cchess_alphazero.environment.static_env as senv
+    c = Config('distribute')
+    files = get_game_data_filenames(c.resource)
+    cnt = 0
+    fix = 0
+    draw_cnt = 0
+    for filename in files:
+        try:
+            data = read_game_data_from_file(filename)
+        except:
+            print(f"error: {filename}")
+            os.remove(filename)
+            continue
+        state = data[0]
+        real_data = [state]
+        need_fix = True
+        draw = False
+        action = None
+        value = None
+        is_red_turn = True
+        for item in data[1:]:
+            action = item[0]
+            value = -item[1]
+            if value == 0:
+                need_fix = False
+                draw = True
+                draw_cnt += 1
+                break
+            state = senv.step(state, action)
+            is_red_turn = not is_red_turn
+            real_data.append([action, value])
+        if not draw:
+            game_over, v, final_move = senv.done(state)
+            if final_move:
+                v = -v
+                is_red_turn = not is_red_turn
+            if not is_red_turn:
+                v = -v
+            if not game_over:
+                v = 1
+            # print(game_over, v, final_move, state)
+            if v == data[1][1]:
+                need_fix = False
+            else:
+                need_fix = True
+        if need_fix:
+            write_game_data_to_file(filename, real_data)
+            # print(filename)
+            fix += 1
+        cnt += 1
+        if cnt % 1000 == 0:
+            print(cnt, fix, draw_cnt)
+    print(f"all {cnt}, fix {fix}, draw {draw_cnt}")
+
+
+def plot_model():
+    from keras.utils import plot_model
+    from cchess_alphazero.agent.model import CChessModel
+    from cchess_alphazero.config import Config
+    from cchess_alphazero.lib.model_helper import save_as_best_model
+    config = Config('distribute')
+    model = CChessModel(config)
+    model.build()
+    save_as_best_model(model)
+    plot_model(model.model, to_file='model.png', show_shapes=True, show_layer_names=True)
+
+def test_check_and_catch():
+    import cchess_alphazero.environment.static_env as senv
+    state = senv.fen_to_state('rnba1cbnr/1a7/1c7/p1p3p1p/2p5k/2P1R4/P1P3P1P/1C5C1/9/RNBAKABN1 r')
+    # state = senv.fliped_state(state)
+    ori_state = state
+    senv.render(state)
+    print()
+    action = '4454'
+    state = senv.step(state, action)
+    senv.render(state)
+    state = senv.fliped_state(state)
+    print()
+    senv.render(state)
+    print(senv.will_check_or_catch(ori_state, action))
+
+def test_be_catched():
+    import cchess_alphazero.environment.static_env as senv
+    state = senv.fen_to_state('rnbakab1r/9/1c3c2n/p1p5p/7p1/3PR4/P1P3P1P/C7C/9/RNBAKABN1 b')
+    # state = senv.fliped_state(state)
+    ori_state = state
+    senv.render(state)
+    print()
+    action = '4454'
+    print(senv.be_catched(ori_state, action))
+    
+
 if __name__ == "__main__":
-    test_upload()
+    test_be_catched()
     
